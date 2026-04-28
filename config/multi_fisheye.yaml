@@ -1,7 +1,8 @@
 multi_fisheye_pub:
   ros__parameters:
-    cam_width: 2048
-    cam_height: 1536
+    #2048x1536, 1600x1200, 1280x960
+    cam_width: 1600
+    cam_height: 1200
     cam_fps: 15
     # 0, 90, 180, 270 (degrees, clockwise). All cameras share this rotation.
     cam_rotation: 180
