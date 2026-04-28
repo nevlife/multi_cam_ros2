@@ -179,15 +179,15 @@ private:
             count++;
 
             double elapsed = duration<double>(steady_clock::now() - log_time).count();
-            if (elapsed >= 5.0) {
-                RCLCPP_INFO(get_logger(),
-                    "[%s] pull=%.1fms copy=%.1fms pub=%.1fms total=%.1fms fps=%.1f",
-                    RAW_CAMERAS[idx].frame_id.c_str(),
-                    ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t0, t3),
-                    count / elapsed);
-                count = 0;
-                log_time = steady_clock::now();
-            }
+            // if (elapsed >= 5.0) {
+            //     RCLCPP_INFO(get_logger(),
+            //         "[%s] pull=%.1fms copy=%.1fms pub=%.1fms total=%.1fms fps=%.1f",
+            //         RAW_CAMERAS[idx].frame_id.c_str(),
+            //         ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t0, t3),
+            //         count / elapsed);
+            //     count = 0;
+            //     log_time = steady_clock::now();
+            // }
         }
     }
 
