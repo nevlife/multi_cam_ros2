@@ -7,6 +7,11 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <linux/videodev2.h>
+
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
@@ -23,10 +28,10 @@ struct RawCamConfig {
 };
 
 static const std::vector<RawCamConfig> RAW_CAMERAS = {
-    {"/dev/cam_front", "/camera/front/image_raw", "cam_front"},
-    {"/dev/cam_left",  "/camera/left/image_raw",  "cam_left"},
-    {"/dev/cam_rear",  "/camera/rear/image_raw",  "cam_rear"},
-    {"/dev/cam_right", "/camera/right/image_raw", "cam_right"},
+    {"/dev/video0", "/camera/front/image_raw", "cam_front"},
+    // {"/dev/cam_left",  "/camera/left/image_raw",  "cam_left"},
+    // {"/dev/cam_rear",  "/camera/rear/image_raw",  "cam_rear"},
+    // {"/dev/cam_right", "/camera/right/image_raw", "cam_right"},
 };
 
 class MultiFisheyePub : public rclcpp::Node
@@ -41,6 +46,35 @@ public:
         cam_h_   = declare_parameter<int>("cam_height");
         cam_fps_ = declare_parameter<int>("cam_fps");
         cam_rot_ = declare_parameter<int>("cam_rotation");
+
+        // v4l2 controls — any value of -1 leaves the camera default untouched.
+        v4l2_params_ = {
+            // exposure / framerate
+            {"auto_exposure",          V4L2_CID_EXPOSURE_AUTO},
+            {"exposure_absolute",      V4L2_CID_EXPOSURE_ABSOLUTE},
+            {"dynamic_framerate",      V4L2_CID_EXPOSURE_AUTO_PRIORITY},
+            // image quality
+            {"brightness",             V4L2_CID_BRIGHTNESS},
+            {"contrast",               V4L2_CID_CONTRAST},
+            {"saturation",             V4L2_CID_SATURATION},
+            {"hue",                    V4L2_CID_HUE},
+            {"gamma",                  V4L2_CID_GAMMA},
+            {"gain",                   V4L2_CID_GAIN},
+            {"sharpness",              V4L2_CID_SHARPNESS},
+            {"backlight_compensation", V4L2_CID_BACKLIGHT_COMPENSATION},
+            // white balance
+            {"white_balance_auto",     V4L2_CID_AUTO_WHITE_BALANCE},
+            {"white_balance_temp",     V4L2_CID_WHITE_BALANCE_TEMPERATURE},
+            // environment
+            {"power_line_frequency",   V4L2_CID_POWER_LINE_FREQUENCY},
+            // optical
+            {"pan_absolute",           V4L2_CID_PAN_ABSOLUTE},
+            {"tilt_absolute",          V4L2_CID_TILT_ABSOLUTE},
+            {"zoom_absolute",          V4L2_CID_ZOOM_ABSOLUTE},
+        };
+        for (auto &p : v4l2_params_) {
+            p.value = declare_parameter<int>(p.name, -1);
+        }
 
         if (cam_rot_ != 0 && cam_rot_ != 90 && cam_rot_ != 180 && cam_rot_ != 270) {
             throw std::runtime_error("cam_rotation must be one of 0, 90, 180, 270");
@@ -90,8 +124,34 @@ private:
         }
     }
 
+    void apply_v4l2_controls(const std::string &device)
+    {
+        int fd = ::open(device.c_str(), O_RDWR);
+        if (fd < 0) {
+            RCLCPP_WARN(get_logger(), "[%s] open() for v4l2 controls failed: %s",
+                        device.c_str(), std::strerror(errno));
+            return;
+        }
+        for (const auto &p : v4l2_params_) {
+            if (p.value < 0) continue;
+            v4l2_control ctl{};
+            ctl.id = p.id;
+            ctl.value = p.value;
+            if (::ioctl(fd, VIDIOC_S_CTRL, &ctl) < 0) {
+                RCLCPP_WARN(get_logger(), "[%s] set %s=%d failed: %s",
+                            device.c_str(), p.name.c_str(), p.value, std::strerror(errno));
+            } else {
+                RCLCPP_INFO(get_logger(), "[%s] %s = %d",
+                            device.c_str(), p.name.c_str(), p.value);
+            }
+        }
+        ::close(fd);
+    }
+
     void open_camera(size_t idx)
     {
+        apply_v4l2_controls(RAW_CAMERAS[idx].device);
+
         std::string flip_stage;
         if (cam_rot_ != 0) {
             flip_stage = std::string("videoflip method=") + videoflip_method(cam_rot_) + " ! ";
@@ -179,15 +239,15 @@ private:
             count++;
 
             double elapsed = duration<double>(steady_clock::now() - log_time).count();
-            // if (elapsed >= 5.0) {
-            //     RCLCPP_INFO(get_logger(),
-            //         "[%s] pull=%.1fms copy=%.1fms pub=%.1fms total=%.1fms fps=%.1f",
-            //         RAW_CAMERAS[idx].frame_id.c_str(),
-            //         ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t0, t3),
-            //         count / elapsed);
-            //     count = 0;
-            //     log_time = steady_clock::now();
-            // }
+            if (elapsed >= 5.0) {
+                RCLCPP_INFO(get_logger(),
+                    "[%s] fps=%.1f  pull=%.1fms copy=%.1fms pub=%.1fms total=%.1fms",
+                    RAW_CAMERAS[idx].frame_id.c_str(),
+                    count / elapsed,
+                    ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t0, t3));
+                count = 0;
+                log_time = steady_clock::now();
+            }
         }
     }
 
@@ -195,9 +255,16 @@ private:
         return duration<double, std::milli>(b - a).count();
     }
 
+    struct V4L2Param {
+        std::string name;
+        uint32_t id;
+        int value{-1};
+    };
+
     std::atomic<bool> running_{true};
     int cam_w_, cam_h_, cam_fps_, cam_rot_;
     int out_w_, out_h_;
+    std::vector<V4L2Param> v4l2_params_;
     std::vector<rclcpp::Publisher<ImageMsg>::SharedPtr> pubs_;
     std::vector<GstElement *> pipelines_;
     std::vector<GstElement *> sinks_;

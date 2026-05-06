@@ -15,18 +15,21 @@ find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0)
+pkg_check_modules(GST REQUIRED IMPORTED_TARGET
+  gstreamer-1.0>=1.20
+  gstreamer-app-1.0>=1.20
+)
 
 add_executable(multi_fisheye_node src/multi_fisheye_node.cpp)
 
 target_include_directories(multi_fisheye_node PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  ${GST_INCLUDE_DIRS}
 )
 
-target_link_libraries(multi_fisheye_node ${GST_LIBRARIES})
-target_compile_options(multi_fisheye_node PRIVATE ${GST_CFLAGS_OTHER})
+target_link_libraries(multi_fisheye_node
+  PkgConfig::GST
+)
 
 ament_target_dependencies(multi_fisheye_node
   rclcpp
