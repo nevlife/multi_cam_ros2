@@ -3,8 +3,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -21,19 +23,6 @@
 using ImageMsg = sensor_msgs::msg::Image;
 using namespace std::chrono;
 
-struct RawCamConfig {
-    std::string device;
-    std::string topic;
-    std::string frame_id;
-};
-
-static const std::vector<RawCamConfig> RAW_CAMERAS = {
-    {"/dev/video0", "/camera/front/image_raw", "cam_front"},
-    // {"/dev/cam_left",  "/camera/left/image_raw",  "cam_left"},
-    // {"/dev/cam_rear",  "/camera/rear/image_raw",  "cam_rear"},
-    // {"/dev/cam_right", "/camera/right/image_raw", "cam_right"},
-};
-
 class MultiFisheyePub : public rclcpp::Node
 {
 public:
@@ -42,13 +31,8 @@ public:
     {
         gst_init(nullptr, nullptr);
 
-        cam_w_   = declare_parameter<int>("cam_width");
-        cam_h_   = declare_parameter<int>("cam_height");
-        cam_fps_ = declare_parameter<int>("cam_fps");
-        cam_rot_ = declare_parameter<int>("cam_rotation");
-
-        // v4l2 controls — any value of -1 leaves the camera default untouched.
-        v4l2_params_ = {
+        // V4L2 control table — name as it appears in YAML, V4L2 CID, sentinel = -1.
+        const std::vector<std::pair<std::string, uint32_t>> v4l2_defs = {
             // exposure / framerate
             {"auto_exposure",          V4L2_CID_EXPOSURE_AUTO},
             {"exposure_absolute",      V4L2_CID_EXPOSURE_ABSOLUTE},
@@ -72,34 +56,69 @@ public:
             {"tilt_absolute",          V4L2_CID_TILT_ABSOLUTE},
             {"zoom_absolute",          V4L2_CID_ZOOM_ABSOLUTE},
         };
-        for (auto &p : v4l2_params_) {
-            p.value = declare_parameter<int>(p.name, -1);
+
+        auto cam_names = declare_parameter<std::vector<std::string>>("cameras");
+        if (cam_names.empty()) {
+            throw std::runtime_error("`cameras` list is empty — nothing to open");
         }
 
-        if (cam_rot_ != 0 && cam_rot_ != 90 && cam_rot_ != 180 && cam_rot_ != 270) {
-            throw std::runtime_error("cam_rotation must be one of 0, 90, 180, 270");
+        // Common defaults (required: capture format; optional: v4l2 controls).
+        const int common_w   = declare_parameter<int>("common.cam_width");
+        const int common_h   = declare_parameter<int>("common.cam_height");
+        const int common_fps = declare_parameter<int>("common.cam_fps");
+        const int common_rot = declare_parameter<int>("common.cam_rotation");
+
+        std::map<std::string, int> common_v4l2;
+        for (const auto &[name, _id] : v4l2_defs) {
+            common_v4l2[name] = declare_parameter<int>("common." + name, -1);
         }
 
-        if (cam_rot_ == 90 || cam_rot_ == 270) {
-            out_w_ = cam_h_;
-            out_h_ = cam_w_;
-        } else {
-            out_w_ = cam_w_;
-            out_h_ = cam_h_;
-        }
+        // Build per-camera config (per-camera value falls back to common).
+        for (const auto &cam : cam_names) {
+            CameraConfig cfg;
+            cfg.name     = cam;
+            cfg.device   = declare_parameter<std::string>(cam + ".device");
+            cfg.topic    = declare_parameter<std::string>(cam + ".topic");
+            cfg.frame_id = declare_parameter<std::string>(cam + ".frame_id");
 
-        RCLCPP_INFO(get_logger(),
-                     "Raw publish mode (no undistort) — capture %dx%d@%dfps, rotate=%d, publish %dx%d",
-                     cam_w_, cam_h_, cam_fps_, cam_rot_, out_w_, out_h_);
+            cfg.cam_w   = declare_parameter<int>(cam + ".cam_width",    common_w);
+            cfg.cam_h   = declare_parameter<int>(cam + ".cam_height",   common_h);
+            cfg.cam_fps = declare_parameter<int>(cam + ".cam_fps",      common_fps);
+            cfg.cam_rot = declare_parameter<int>(cam + ".cam_rotation", common_rot);
+
+            if (cfg.cam_rot != 0 && cfg.cam_rot != 90 && cfg.cam_rot != 180 && cfg.cam_rot != 270) {
+                throw std::runtime_error("[" + cam + "] cam_rotation must be one of 0, 90, 180, 270");
+            }
+            if (cfg.cam_rot == 90 || cfg.cam_rot == 270) {
+                cfg.out_w = cfg.cam_h;
+                cfg.out_h = cfg.cam_w;
+            } else {
+                cfg.out_w = cfg.cam_w;
+                cfg.out_h = cfg.cam_h;
+            }
+
+            for (const auto &[name, id] : v4l2_defs) {
+                int v = declare_parameter<int>(cam + "." + name, common_v4l2[name]);
+                cfg.v4l2_params.push_back({name, id, v});
+            }
+
+            RCLCPP_INFO(get_logger(),
+                "[%s] %s — capture %dx%d@%dfps, rotate=%d, publish %dx%d",
+                cfg.name.c_str(), cfg.device.c_str(),
+                cfg.cam_w, cfg.cam_h, cfg.cam_fps, cfg.cam_rot,
+                cfg.out_w, cfg.out_h);
+
+            cameras_.push_back(std::move(cfg));
+        }
 
         auto qos = rclcpp::QoS(10).reliable().durability_volatile();
 
-        for (size_t i = 0; i < RAW_CAMERAS.size(); i++) {
-            pubs_.push_back(create_publisher<ImageMsg>(RAW_CAMERAS[i].topic, qos));
+        for (size_t i = 0; i < cameras_.size(); i++) {
+            pubs_.push_back(create_publisher<ImageMsg>(cameras_[i].topic, qos));
             open_camera(i);
             threads_.emplace_back(&MultiFisheyePub::capture_loop, this, i);
         }
-        RCLCPP_INFO(get_logger(), "All %zu cameras started (raw)", RAW_CAMERAS.size());
+        RCLCPP_INFO(get_logger(), "All %zu cameras started (raw)", cameras_.size());
     }
 
     ~MultiFisheyePub() override
@@ -124,25 +143,41 @@ private:
         }
     }
 
-    void apply_v4l2_controls(const std::string &device)
+    struct V4L2Param {
+        std::string name;
+        uint32_t id;
+        int value{-1};
+    };
+
+    struct CameraConfig {
+        std::string name;
+        std::string device;
+        std::string topic;
+        std::string frame_id;
+        int cam_w{0}, cam_h{0}, cam_fps{0}, cam_rot{0};
+        int out_w{0}, out_h{0};
+        std::vector<V4L2Param> v4l2_params;
+    };
+
+    void apply_v4l2_controls(const CameraConfig &cfg)
     {
-        int fd = ::open(device.c_str(), O_RDWR);
+        int fd = ::open(cfg.device.c_str(), O_RDWR);
         if (fd < 0) {
             RCLCPP_WARN(get_logger(), "[%s] open() for v4l2 controls failed: %s",
-                        device.c_str(), std::strerror(errno));
+                        cfg.device.c_str(), std::strerror(errno));
             return;
         }
-        for (const auto &p : v4l2_params_) {
+        for (const auto &p : cfg.v4l2_params) {
             if (p.value < 0) continue;
             v4l2_control ctl{};
             ctl.id = p.id;
             ctl.value = p.value;
             if (::ioctl(fd, VIDIOC_S_CTRL, &ctl) < 0) {
                 RCLCPP_WARN(get_logger(), "[%s] set %s=%d failed: %s",
-                            device.c_str(), p.name.c_str(), p.value, std::strerror(errno));
+                            cfg.device.c_str(), p.name.c_str(), p.value, std::strerror(errno));
             } else {
                 RCLCPP_INFO(get_logger(), "[%s] %s = %d",
-                            device.c_str(), p.name.c_str(), p.value);
+                            cfg.device.c_str(), p.name.c_str(), p.value);
             }
         }
         ::close(fd);
@@ -150,18 +185,19 @@ private:
 
     void open_camera(size_t idx)
     {
-        apply_v4l2_controls(RAW_CAMERAS[idx].device);
+        const auto &cfg = cameras_[idx];
+        apply_v4l2_controls(cfg);
 
         std::string flip_stage;
-        if (cam_rot_ != 0) {
-            flip_stage = std::string("videoflip method=") + videoflip_method(cam_rot_) + " ! ";
+        if (cfg.cam_rot != 0) {
+            flip_stage = std::string("videoflip method=") + videoflip_method(cfg.cam_rot) + " ! ";
         }
 
         std::string ps =
-            "v4l2src device=" + RAW_CAMERAS[idx].device + " ! "
-            "image/jpeg,width=" + std::to_string(cam_w_) +
-            ",height=" + std::to_string(cam_h_) +
-            ",framerate=" + std::to_string(cam_fps_) + "/1 ! "
+            "v4l2src device=" + cfg.device + " ! "
+            "image/jpeg,width=" + std::to_string(cfg.cam_w) +
+            ",height=" + std::to_string(cfg.cam_h) +
+            ",framerate=" + std::to_string(cfg.cam_fps) + "/1 ! "
             "jpegdec ! videoconvert ! " +
             flip_stage +
             "video/x-raw,format=BGR ! "
@@ -172,7 +208,7 @@ private:
         if (!pipeline || err) {
             std::string e = err ? err->message : "unknown";
             if (err) g_error_free(err);
-            throw std::runtime_error("Pipeline failed for " + RAW_CAMERAS[idx].device + ": " + e);
+            throw std::runtime_error("Pipeline failed for " + cfg.device + ": " + e);
         }
 
         auto *sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
@@ -188,7 +224,7 @@ private:
             if (gerr) g_error_free(gerr);
             gst_message_unref(msg);
             gst_object_unref(bus);
-            throw std::runtime_error("Camera open failed: " + RAW_CAMERAS[idx].device + ": " + e);
+            throw std::runtime_error("Camera open failed: " + cfg.device + ": " + e);
         }
         if (msg) gst_message_unref(msg);
         gst_object_unref(bus);
@@ -197,15 +233,16 @@ private:
         sinks_.push_back(sink);
 
         RCLCPP_INFO(get_logger(), "[%s] Opened %s — %dx%d@%dfps",
-            RAW_CAMERAS[idx].frame_id.c_str(), RAW_CAMERAS[idx].device.c_str(),
-            cam_w_, cam_h_, cam_fps_);
+            cfg.frame_id.c_str(), cfg.device.c_str(),
+            cfg.cam_w, cfg.cam_h, cfg.cam_fps);
     }
 
     void capture_loop(size_t idx)
     {
+        const auto &cfg = cameras_[idx];
         int count = 0;
         auto log_time = steady_clock::now();
-        const size_t frame_bytes = static_cast<size_t>(out_w_) * out_h_ * 3;
+        const size_t frame_bytes = static_cast<size_t>(cfg.out_w) * cfg.out_h * 3;
 
         while (running_) {
             auto t0 = steady_clock::now();
@@ -222,11 +259,11 @@ private:
             auto t1 = steady_clock::now();
             auto msg = std::make_unique<ImageMsg>();
             msg->header.stamp = this->now();
-            msg->header.frame_id = RAW_CAMERAS[idx].frame_id;
-            msg->height = out_h_;
-            msg->width  = out_w_;
+            msg->header.frame_id = cfg.frame_id;
+            msg->height = cfg.out_h;
+            msg->width  = cfg.out_w;
             msg->encoding = "bgr8";
-            msg->step = out_w_ * 3;
+            msg->step = cfg.out_w * 3;
             msg->data.resize(frame_bytes);
             std::memcpy(msg->data.data(), map.data, frame_bytes);
             auto t2 = steady_clock::now();
@@ -242,7 +279,7 @@ private:
             if (elapsed >= 5.0) {
                 RCLCPP_INFO(get_logger(),
                     "[%s] fps=%.1f  pull=%.1fms copy=%.1fms pub=%.1fms total=%.1fms",
-                    RAW_CAMERAS[idx].frame_id.c_str(),
+                    cfg.frame_id.c_str(),
                     count / elapsed,
                     ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t0, t3));
                 count = 0;
@@ -255,16 +292,8 @@ private:
         return duration<double, std::milli>(b - a).count();
     }
 
-    struct V4L2Param {
-        std::string name;
-        uint32_t id;
-        int value{-1};
-    };
-
     std::atomic<bool> running_{true};
-    int cam_w_, cam_h_, cam_fps_, cam_rot_;
-    int out_w_, out_h_;
-    std::vector<V4L2Param> v4l2_params_;
+    std::vector<CameraConfig> cameras_;
     std::vector<rclcpp::Publisher<ImageMsg>::SharedPtr> pubs_;
     std::vector<GstElement *> pipelines_;
     std::vector<GstElement *> sinks_;
