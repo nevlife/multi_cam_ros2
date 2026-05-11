@@ -21,23 +21,18 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET
 )
 
 add_executable(multi_fisheye_node src/multi_fisheye_node.cpp)
+add_executable(single_cam_node  src/single_cam_node.cpp)
 
-target_include_directories(multi_fisheye_node PRIVATE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
+foreach(tgt multi_fisheye_node single_cam_node)
+  target_include_directories(${tgt} PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(${tgt} PkgConfig::GST)
+  ament_target_dependencies(${tgt} rclcpp std_msgs sensor_msgs)
+endforeach()
 
-target_link_libraries(multi_fisheye_node
-  PkgConfig::GST
-)
-
-ament_target_dependencies(multi_fisheye_node
-  rclcpp
-  std_msgs
-  sensor_msgs
-)
-
-install(TARGETS multi_fisheye_node
+install(TARGETS multi_fisheye_node single_cam_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

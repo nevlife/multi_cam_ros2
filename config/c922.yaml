@@ -1,0 +1,9 @@
+single_cam_pub:
+  ros__parameters:
+    device: /dev/video0
+    topic: /camera/c922/image_raw
+    frame_id: c922
+    pixel_format: mjpeg
+    width: 1920
+    height: 1080
+    fps: 30
