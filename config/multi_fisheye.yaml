@@ -3,7 +3,7 @@ multi_fisheye_pub:
     # ── enabled cameras ───────────────────────────────────────────
     # each name listed here must have a matching block below.
     # add/remove cameras by editing this list (no code changes needed).
-    cameras: ["front"]
+    cameras: ["rear", "left", "right"]
     # cameras: ["front", "left", "rear", "right"]
 
     # ── common defaults ───────────────────────────────────────────
@@ -16,8 +16,8 @@ multi_fisheye_pub:
       cam_width: 2048
       cam_height: 1536
       cam_fps: 30
-      # 0, 90, 180, 270 (degrees, clockwise).
-      cam_rotation: 180
+      # 0, 90, 180, 270 (degrees, clockwise). per-camera override below.
+      cam_rotation: 0
 
       # ── v4l2 controls (applied at node startup, per camera) ────
       # set any value to -1 to leave the camera default untouched.
@@ -75,26 +75,29 @@ multi_fisheye_pub:
     # ── per-camera blocks ─────────────────────────────────────────
     # required per camera: device, topic, frame_id
     # everything else is optional — omit to inherit from `common`.
-    front:
-      device: /dev/video0
-      topic: /camera/front/image_raw
-      frame_id: cam_front
-      # example overrides — uncomment and tweak as needed:
-      # exposure_absolute: 100
-      # gain: 60
-      # cam_rotation: 0
+    # rear camera: mounted upside-down → rotate 180°
+    rear:
+      device: /dev/cam_rear
+      topic: /camera/rear/image_raw
+      frame_id: cam_rear
+      cam_rotation: 180
 
-    # left:
-    #   device: /dev/cam_left
-    #   topic: /camera/left/image_raw
-    #   frame_id: cam_left
+    # left camera: rotated CW 90° to make upright
+    left:
+      device: /dev/cam_side_left
+      topic: /camera/left/image_raw
+      frame_id: cam_left
+      cam_rotation: 90
 
-    # rear:
-    #   device: /dev/cam_rear
-    #   topic: /camera/rear/image_raw
-    #   frame_id: cam_rear
+    # right camera: rotated CCW 90° (= CW 270°) to make upright
+    right:
+      device: /dev/cam_side_right
+      topic: /camera/right/image_raw
+      frame_id: cam_right
+      cam_rotation: 270
 
-    # right:
-    #   device: /dev/cam_right
-    #   topic: /camera/right/image_raw
-    #   frame_id: cam_right
+    # front:
+    #   device: /dev/cam_front
+    #   topic: /camera/front/image_raw
+    #   frame_id: cam_front
+    #   cam_rotation: 0

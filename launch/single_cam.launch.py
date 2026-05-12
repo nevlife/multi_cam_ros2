@@ -9,7 +9,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     default_config = os.path.join(
-        get_package_share_directory('multi_fisheye'),
+        get_package_share_directory('multi_cam'),
         'config',
         'c922.yaml',
     )
@@ -24,7 +24,7 @@ def generate_launch_description():
         ),
 
         Node(
-            package='multi_fisheye',
+            package='multi_cam',
             executable='single_cam_node',
             name='single_cam_pub',
             output='screen',
